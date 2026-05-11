@@ -1,0 +1,11 @@
+{
+  "name": "concurrent-demo",
+  "version": "1.0.0",
+  "description": "多任务并发练习demo",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "license": "MIT"
+}

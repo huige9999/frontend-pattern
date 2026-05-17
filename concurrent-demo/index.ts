@@ -1,14 +1,14 @@
-
-type Task<T> = () => Promise<T>
-
+type Task<T> = () => Promise<T>;
 
 type TaskItem = {
   id: string;
+  priority: number;
+  createdAt: number;
   status: TaskStatus;
   task: Task<unknown>;
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
-}
+};
 
 type Snapshot = {
   concurrency: number;
@@ -16,22 +16,20 @@ type Snapshot = {
   pendingCount: number;
   runningIds: string[];
   pendingIds: string[];
+};
+
+type TaskStatus = "pending" | "running" | "success" | "failed";
+
+function makeTask(ms: number): Task<any> {
+  return () =>
+    new Promise((resolve) => {
+      console.log(`start task ${ms}`);
+      setTimeout(() => {
+        console.log(`end task ${ms}`);
+        resolve(ms);
+      }, ms);
+    });
 }
-
-type TaskStatus = 'pending' | 'running' | 'success' | 'failed'
-
-
-function makeTask(ms: number):Task<any> {
-  return () => new Promise((resolve) => {
-    console.log(`start task ${ms}`);
-    setTimeout(() => {
-      console.log(`end task ${ms}`);
-      resolve(ms);
-    }, ms);
-  })
-}
-
-
 
 export class TaskScheduler {
   private readonly concurrency: number;
@@ -57,10 +55,10 @@ export class TaskScheduler {
   }
 
   private get pendingIds() {
-    return this.queue.map(({id}) =>  id);
+    return this.queue.map(({ id }) => id);
   }
 
-  addTask<T>(_task: Task<T>, options?: { id?: string }): Promise<T> {
+  addTask<T>(_task: Task<T>, options?: { id?: string, priority?: number }): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = options?.id ?? `task-${this.nextId++}`;
       // 判断id是否已经存在
@@ -70,15 +68,23 @@ export class TaskScheduler {
       }
       const taskItem: TaskItem = {
         id,
+        priority: options?.priority ?? 0,
+        createdAt: Date.now(),
         task: _task,
-        status: 'pending',
+        status: "pending",
         resolve: resolve as (value: unknown) => void,
         reject,
-      }
-      this.queue.push(taskItem)
+      };
+      this.queue.push(taskItem);
+      this.queue.sort((a, b) => {
+        if (a.priority !== b.priority) {
+          return b.priority - a.priority;
+        }
+        return a.createdAt - b.createdAt;
+      });
       this.taskMap.set(id, taskItem);
       this.schedule();
-    })
+    });
   }
 
   getStatus(taskId: string): TaskStatus | undefined {
@@ -86,56 +92,39 @@ export class TaskScheduler {
   }
 
   private schedule(): void {
-    while(this.runningCount < this.concurrency && this.queue.length > 0) {
-        const { id, task, resolve, reject } = this.queue.shift()!;
-        const taskItem = {
-          id,
-          task,
-          status: 'running',
-          resolve,
-          reject,
-        }
-        this.running.set(id, taskItem as TaskItem);
-        this.taskMap.set(id, taskItem as TaskItem);
-
-        task().then((result) => {
-          this.running.delete(id);
-          this.taskMap.get(id)!.status = 'success';
-          resolve(result);
-        }).catch((error) => {
-          this.running.delete(id);
-          this.taskMap.get(id)!.status = 'failed';
-          reject(error);
-        }).finally(() => {
-          this.running.delete(id);
-          this.schedule();
-        })
+    while (this.runningCount < this.concurrency && this.queue.length > 0) {
+      const taskItem = this.queue.shift()!;
+      taskItem.status = "running";
+      this.running.set(taskItem.id, taskItem);
+      this.taskMap.set(taskItem.id, taskItem);
+      taskItem.task().then((result) => {
+        taskItem.status = "success";
+        taskItem.resolve(result);
+      }).catch((error) => {
+        taskItem.status = "failed";
+        taskItem.reject(error);
+      }).finally(() => {
+        this.running.delete(taskItem.id);
+        this.schedule();
+      });
     }
-
   }
 
-  getSnapshot():Snapshot {
+  getSnapshot(): Snapshot {
     return {
       concurrency: this.concurrency,
       runningCount: this.runningCount,
       pendingCount: this.pendingCount,
       runningIds: this.runningIds,
       pendingIds: this.pendingIds,
-    }
+    };
   }
 }
 
-
 const taskScheduler = new TaskScheduler(2);
 
-const task1 = taskScheduler.addTask(makeTask(1000), { id: 'task-1' })
-const task2 = taskScheduler.addTask(makeTask(1000), { id: 'task-2' })
-const task3 = taskScheduler.addTask(makeTask(1000), { id: 'task-3' })
-const task4 = taskScheduler.addTask(makeTask(1000), { id: 'task-4' })
-const task5 = taskScheduler.addTask(makeTask(1000), { id: 'task-5' })
-
-console.log('after add:',taskScheduler.getStatus('task-1'));
-
-Promise.all([task1, task2, task3, task4, task5]).then(() => {
-  console.log('after all:',taskScheduler.getStatus('task-1'));
-});
+taskScheduler.addTask(makeTask(1000), { id: "task-1" });
+taskScheduler.addTask(makeTask(1000), { id: "task-2" });
+taskScheduler.addTask(makeTask(1000), { id: "task-3" });
+taskScheduler.addTask(makeTask(1000), { id: "task-4" });
+taskScheduler.addTask(makeTask(1000), { id: "task-5" });

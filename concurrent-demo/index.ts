@@ -1,3 +1,4 @@
+
 type Task<T> = () => Promise<T>;
 
 type TaskItem = {
@@ -18,7 +19,17 @@ type Snapshot = {
   pendingIds: string[];
 };
 
-type TaskStatus = "pending" | "running" | "success" | "failed";
+type TaskStatus = "pending" | "running" | "success" | "failed" | "cancelled";
+
+
+class CancleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CancleError";
+  }
+}
+
+
 
 function makeTask(ms: number): Task<any> {
   return () =>
@@ -119,12 +130,18 @@ export class TaskScheduler {
       pendingIds: this.pendingIds,
     };
   }
+
+  cancel(taskId: string):boolean {
+    const taskItem = this.taskMap.get(taskId);
+    if(!taskItem) {
+      return false;
+    }
+    if(taskItem.status !== "pending") {
+      return false;
+    }
+    taskItem.status = "cancelled";
+    taskItem.reject(new CancleError("Task cancelled"));
+    this.queue = this.queue.filter((item) => item.id !== taskId);
+    return true;
+  }
 }
-
-const taskScheduler = new TaskScheduler(2);
-
-taskScheduler.addTask(makeTask(1000), { id: "task-1" });
-taskScheduler.addTask(makeTask(1000), { id: "task-2" });
-taskScheduler.addTask(makeTask(1000), { id: "task-3" });
-taskScheduler.addTask(makeTask(1000), { id: "task-4" });
-taskScheduler.addTask(makeTask(1000), { id: "task-5" });

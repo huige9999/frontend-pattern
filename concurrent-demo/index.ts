@@ -1,13 +1,10 @@
-
-type Task<T> = (ctx: {
-  signal: AbortSignal;
-  taskId: string;
-}) => Promise<T>;
+type Task<T> = (ctx: { signal: AbortSignal; taskId: string }) => Promise<T>;
 
 type TaskItem = {
   id: string;
   priority: number;
   createdAt: number;
+  timeout?: number;
   status: TaskStatus;
   task: Task<unknown>;
   controller: AbortController;
@@ -23,8 +20,13 @@ type Snapshot = {
   pendingIds: string[];
 };
 
-type TaskStatus = "pending" | "running" | "success" | "failed" | "cancelled";
-
+type TaskStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "timeout";
 
 class CancelError extends Error {
   constructor(message: string) {
@@ -36,14 +38,12 @@ class CancelError extends Error {
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
+    signal?.addEventListener("abort", () => {
       clearTimeout(timer);
-      reject(new Error('aborted'));
+      reject(new Error("aborted"));
     });
   });
 }
-
-
 
 export class TaskScheduler {
   private readonly concurrency: number;
@@ -72,7 +72,10 @@ export class TaskScheduler {
     return this.queue.map(({ id }) => id);
   }
 
-  addTask<T>(_task: Task<T>, options?: { id?: string, priority?: number }): Promise<T> {
+  addTask<T>(
+    _task: Task<T>,
+    options?: { id?: string; priority?: number; timeout?: number },
+  ): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = options?.id ?? `task-${this.nextId++}`;
       // 判断id是否已经存在
@@ -84,11 +87,12 @@ export class TaskScheduler {
         id,
         priority: options?.priority ?? 0,
         createdAt: Date.now(),
+        timeout: options?.timeout,
         task: _task,
         status: "pending",
         resolve: resolve as (value: unknown) => void,
         reject,
-        controller: new AbortController()
+        controller: new AbortController(),
       };
       this.queue.push(taskItem);
       this.queue.sort((a, b) => {
@@ -109,22 +113,82 @@ export class TaskScheduler {
   private schedule(): void {
     while (this.runningCount < this.concurrency && this.queue.length > 0) {
       const taskItem = this.queue.shift()!;
-      taskItem.status = "running";
-      this.running.set(taskItem.id, taskItem);
-      this.taskMap.set(taskItem.id, taskItem);
-      taskItem.task({
+      if (taskItem.timeout) {
+        this.runWithTimeout(taskItem);
+      } else {
+        this.runTask(taskItem);
+      }
+    }
+  }
+
+  private async runTask(taskItem: TaskItem) {
+    taskItem.status = "running";
+    this.running.set(taskItem.id, taskItem);
+    this.taskMap.set(taskItem.id, taskItem);
+    return taskItem
+      .task({
         signal: taskItem.controller.signal,
-        taskId: taskItem.id
-      }).then((result) => {
+        taskId: taskItem.id,
+      })
+      .then((result) => {
         taskItem.status = "success";
         taskItem.resolve(result);
-      }).catch((error) => {
+      })
+      .catch((error) => {
         taskItem.status = error.message === "aborted" ? "cancelled" : "failed";
         taskItem.reject(error);
-      }).finally(() => {
+      })
+      .finally(() => {
         this.running.delete(taskItem.id);
         this.schedule();
       });
+  }
+
+  private async runWithTimeout(taskItem: TaskItem) {
+    taskItem.status = "running";
+    this.running.set(taskItem.id, taskItem);
+    this.taskMap.set(taskItem.id, taskItem);
+    let settled = false;
+    let hasDeletedAndNextScheduled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      taskItem.controller.abort();
+      taskItem.status = "timeout";
+      taskItem.reject(new Error("timeout"));
+      if (!hasDeletedAndNextScheduled) {
+        hasDeletedAndNextScheduled = true;
+        this.running.delete(taskItem.id);
+        this.schedule();
+      }
+    }, taskItem.timeout);
+    try {
+      const result = await taskItem.task({
+        signal: taskItem.controller.signal,
+        taskId: taskItem.id,
+      });
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      taskItem.status = "success";
+      taskItem.resolve(result);
+    } catch (error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      taskItem.status =
+        (error as Error).message === "aborted" ? "cancelled" : "failed";
+      taskItem.reject(error);
+    } finally {
+      if (settled) {
+        clearTimeout(timer);
+      }
+      if (!hasDeletedAndNextScheduled) {
+        hasDeletedAndNextScheduled = true;
+        this.running.delete(taskItem.id);
+        this.schedule();
+      }
     }
   }
 
@@ -138,16 +202,16 @@ export class TaskScheduler {
     };
   }
 
-  cancel(taskId: string):boolean {
+  cancel(taskId: string): boolean {
     const taskItem = this.taskMap.get(taskId);
-    if(!taskItem) {
+    if (!taskItem) {
       return false;
     }
-    if(taskItem.status === "running") {
+    if (taskItem.status === "running") {
       taskItem.controller.abort();
       return true;
     }
-    if(taskItem.status === "pending") {
+    if (taskItem.status === "pending") {
       taskItem.status = "cancelled";
       taskItem.reject(new CancelError("Task cancelled"));
       this.queue = this.queue.filter((item) => item.id !== taskId);
@@ -159,13 +223,16 @@ export class TaskScheduler {
 
 const taskScheduler = new TaskScheduler(2);
 
-taskScheduler.addTask(async ({ signal, taskId }) => {
-  await sleep(1000, signal);
-  return `task ${taskId} completed`;
-}).then((result) => {
-  console.log(result);
-}).catch((error) => {
-  console.error(error);
-});
+taskScheduler
+  .addTask(async ({ signal, taskId }) => {
+    await sleep(1000, signal);
+    return `task ${taskId} completed`;
+  })
+  .then((result) => {
+    console.log(result);
+  })
+  .catch((error) => {
+    console.error(error);
+  });
 
 taskScheduler.cancel("task-1");
